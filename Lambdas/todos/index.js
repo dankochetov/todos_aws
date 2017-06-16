@@ -2,185 +2,91 @@ const AWS = require('aws-sdk');
 const uuid = require('uuid');
 
 const DocumentClient = new AWS.DynamoDB.DocumentClient();
+const Lambda = new AWS.Lambda();
 
-const getResponse = ({statusCode, headers, result}) => {
-    let response = {statusCode};
-
-    if (headers) {
-        response.headers = headers;
-    }
-    if (result) {
-        response.body = JSON.stringify(result);
-    }
-
-    return response;
-};
-
-const processRequest = (event) => {
-    switch (event.httpMethod) {
-        case 'GET':
-            return new Promise((resolve, reject) => {
-                if (!event.queryStringParameters) {
-                    return reject({
-                        message: 'Query string is not provided'
-                    });
-                }
-
-                let {id} = event.queryStringParameters;
-
-                if (id == null) {
-                    return reject({
-                        message: 'Parameter "id" is not provided'
-                    });
-                }
-
-                let params = {
-                    TableName: 'todos',
-                    Key: {id}
-                };
-
-                DocumentClient.get(params, function(err, data) {
-                    if (err) {
-                        return reject(err);
-                    }
-
-                    if (!data.Item) {
-                        return reject({
-                            message: `No item with id "${id}"`
-                        });
-                    }
-
-                    resolve(data.Item);
-                });
-            });
-        case 'PUT':
-            return new Promise((resolve, reject) => {
-                if (!event.body) {
-                    return reject({
-                        message: "No request body provided"
-                    });
-                }
-
-                let {text} = JSON.parse(event.body);
-
-                if (text == null) {
-                    return reject({
-                        message: 'Parameter "text" is not provided'
-                    });
-                }
-
-                let item = {
-                    id: uuid.v4(),
-                    text
-                };
-                let params = {
-                    TableName: 'todos',
-                    Item: item
-                }
-
-                DocumentClient.put(params, (err, data) => {
-                    if (err) {
-                        return reject(err);
-                    }
-
-                    resolve(item);
-                });
-            });
-        case 'PATCH':
-            return new Promise((resolve, reject) => {
-                if (!event.body) {
-                    return reject({
-                        message: "No request body provided"
-                    });
-                }
-
-                let {id, text} = JSON.parse(event.body);
-
-                if (id == null) {
-                    return reject({
-                        message: 'Parameter "id" is not provided'
-                    });
-                }
-                if (text == null) {
-                    return reject({
-                        message: 'Parameter "text" is not provided'
-                    });
-                }
-
-                let item = {id, text};
-                let params = {
-                    TableName: 'todos',
-                    Item: item
-                };
-
-                DocumentClient.put(params, (err, data) => {
-                    if (err) {
-                        return reject(err);
-                    }
-
-                    resolve(item);
-                });
-            });
-        case 'DELETE':
-            return new Promise((resolve, reject) => {
-                if (!event.queryStringParameters) {
-                    return reject({
-                        message: 'Query string is not provided'
-                    });
-                }
-
-                let {id} = event.queryStringParameters;
-
-                if (id == null) {
-                    return reject({
-                        message: 'Property "id" is not provided'
-                    });
-                }
-
-                let params = {
-                    TableName: 'todos',
-                    Key: {
-                        id
-                    }
-                };
-
-                DocumentClient.delete(params, (err, data) => {
-                    if (err) {
-                        return reject(err);
-                    }
-
-                    resolve({id});
-                });
-            });
-        default:
-            return new Promise((resolve, reject) => {
-                reject({
-                    message: 'Unsupported HTTP method: ' + event.httpMethod
-                });
-            });
-    }
-}
-
-exports.handler = (event, context, callback) => {
-    let result;
-    let statusCode = 200;
+const getResponse = ({statusCode = 200, result = {}}) => {
     let headers = {
         'Content-Type': 'application/json'
     };
 
+    return {
+        statusCode,
+        headers,
+        body: JSON.stringify(result)
+    }
+};
+
+const validate = (data) => {
+    return new Promise((resolve, reject) => {
+        Lambda.invoke({
+            FunctionName: 'validate',
+            Payload: JSON.stringify(data)
+        }, (error, data) => {
+            if (error) {
+                reject(error);
+            }
+            else {
+                resolve(data);
+            }
+        });
+    });
+};
+
+const processRequest = (event) => {
+    return new Promise((resolve, reject) => {
+        let method = event.httpMethod;
+
+        validate({
+            method,
+            data: {
+                body: event.body,
+                queryStringParameters: event.queryStringParameters
+            }
+        })
+            .then((validateResult) => {
+                let payload = JSON.parse(validateResult.Payload);
+
+                if (!payload.isValid) {
+                    return reject({
+                        message: payload.errorMessage
+                    });
+                }
+
+                Lambda.invoke({
+                    FunctionName: 'DB',
+                    Payload: JSON.stringify({
+                        method,
+                        data: Object.assign({}, JSON.parse(event.body || '{}'), event.queryStringParameters || {})
+                    })
+                }, (error, data) => {
+                    if (error) {
+                        return reject(error);
+                    }
+
+                    resolve(JSON.parse(data.Payload));
+                });
+            })
+            .catch(error => {
+                reject(error);
+            });
+    });
+};
+
+exports.handler = (event, context, callback) => {
     processRequest(event)
         .then(data => {
-            result = data;
-            callback(null, getResponse({statusCode, headers, result}));
+            let result = data;
+            callback(null, getResponse({result}));
         })
         .catch(err => {
-             console.error(err);
-             if (err.message) {
-                 result = {
-                     message: err.message
-                 };
-             }
-             callback(null, getResponse({statusCode: 400, headers, result}));
+            console.error(err);
+            let result;
+            if (err.message) {
+                result = {
+                    message: err.message
+                };
+            }
+            callback(null, getResponse({statusCode: 400, result}));
         });
 
 };

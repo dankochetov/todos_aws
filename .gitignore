@@ -1,3 +1,7 @@
 .idea
 Lambdas/**/node_modules
 Lambdas/todos/*.zip
+Lambdas/validate/*.zip
+Lambdas/DB/*.zip
+Lambdas/dynamodb/*.zip
+Lambdas/s3/*.zip
